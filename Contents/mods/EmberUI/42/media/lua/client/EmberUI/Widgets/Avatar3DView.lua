@@ -1,0 +1,234 @@
+--[[
+    Avatar3DView.lua - EmberRoutes UI
+    Static cached 3D character portrait.
+
+    Bakes the worker's actual 3D model appearance into a single cached texture
+    via the engine DeadBodyAtlas (the same tech ProjectRemnants uses for party
+    portraits) and draws that ONE image. This replaces the earlier per-frame
+    ISUI3DModel viewport, so roster render cost is independent of NPC count and
+    the人员管理 screen never spins up a live skeletal-animation view per worker.
+
+    Draw crop constants (PORTRAIT_TEXTURE_ZOOM / Y_OFFSET) are replicated from
+    the proven ProjectRemnants NPCFW_PartyPortrait path.
+]]
+
+require "ISUI/ISPanel"
+local Theme = require "EmberUI/Core/Theme"
+local Chrome = require "EmberUI/Core/Chrome"
+local Clock = require "EmberUI/Core/Clock"
+
+---@class EmberRoutesAvatar3DView:ISPanel
+---@field fontHeight number
+---@field pad number
+---@field character IsoGameCharacter?
+---@field survivorDesc SurvivorDesc?
+---@field isBust boolean
+---@field injuryAlert boolean
+---@field statusText string?
+---@field statusColor table?
+local Avatar3DView = ISPanel:derive("EmberUIAvatar3DView")
+
+local portraitProvider = nil
+
+---@param fn (fun(character:any):Texture?)?
+function Avatar3DView.setPortraitProvider(fn)
+    portraitProvider = type(fn) == "function" and fn or nil
+end
+
+-- Crop presets replicated from ProjectRemnants NPCFW_PartyPortrait (proven).
+local PORTRAIT_TEXTURE_ZOOM      = 5.5    -- head-and-torso bust framing
+local PORTRAIT_TEXTURE_Y_OFFSET  = -0.70
+local FULLBODY_TEXTURE_ZOOM      = 2.2    -- whole-body framing
+local FULLBODY_TEXTURE_Y_OFFSET  = 0.0
+Avatar3DView.PORTRAIT_TEXTURE_ZOOM = PORTRAIT_TEXTURE_ZOOM
+Avatar3DView.PORTRAIT_TEXTURE_Y_OFFSET = PORTRAIT_TEXTURE_Y_OFFSET
+
+---@param x number
+---@param y number
+---@param width number
+---@param height number
+---@return EmberRoutesAvatar3DView
+function Avatar3DView:new(x, y, width, height)
+    local o = ISPanel.new(self, x, y, width, height)
+    o.background = false
+    o.fontHeight = getTextManager():getFontHeight(UIFont.Small)
+    o.pad = math.ceil(o.fontHeight * 0.4)
+    o.character = nil
+    o.survivorDesc = nil
+    o.isBust = true
+    o.injuryAlert = false
+    o.statusText = nil
+    o.statusColor = nil
+    o.fallbackTexture = nil
+    o.fallbackInitials = nil
+    -- Cached portrait (a Texture userdata from the Java bridge).
+    o.portraitTexture = nil
+    o.portraitCharacter = nil
+    o.portraitRefreshAt = 0
+    o:initialise()
+    return o
+end
+
+function Avatar3DView:initialise()
+    ISPanel.initialise(self)
+end
+
+function Avatar3DView:createChildren()
+    -- No live 3D viewport. The portrait is a single cached texture drawn in
+    -- prerender, so this widget costs nothing per frame.
+    ISPanel.createChildren(self)
+end
+
+---Toggle between Face/Torso bust framing and full-body framing.
+---This only swaps the draw crop preset; it does not re-render a 3D model.
+function Avatar3DView:toggleBust()
+    self.isBust = not self.isBust
+end
+
+---Update character reference and cached-portrait source.
+---@param character IsoGameCharacter?
+---@param desc SurvivorDesc?
+---@param fallbackOpts table? {texture=Texture, initials=string, injury=boolean}
+function Avatar3DView:setCharacter(character, desc, fallbackOpts)
+    self.character = character
+    self.survivorDesc = desc or (character and character.getDescriptor and character:getDescriptor())
+    fallbackOpts = fallbackOpts or {}
+    self.fallbackTexture = fallbackOpts.texture
+    self.fallbackInitials = fallbackOpts.initials
+    self.initialsW = self.fallbackInitials and getTextManager():MeasureStringX(UIFont.Small, self.fallbackInitials) or 0
+    self.injuryAlert = fallbackOpts.injury or false
+
+    -- Force a portrait re-fetch whenever the bound character changes.
+    if self.portraitCharacter ~= character then
+        self.portraitTexture = nil
+        self.portraitCharacter = character
+        self.portraitRefreshAt = 0
+        self:fetchPortrait()
+    end
+end
+
+---Invalidate and refresh outside drawing; activation-scoped callers only.
+---Force the next update to re-bake the portrait (call after clothing/equip change).
+function Avatar3DView:invalidatePortrait()
+    if self.portraitCharacter then
+        self.portraitRefreshAt = 0
+        self:fetchPortrait()
+    end
+end
+
+---Lazily (re)bake the portrait texture via the Java bridge. Throttled so the
+---Lua->Java round-trip only happens when the character or equipment changes.
+function Avatar3DView:fetchPortrait()
+    local character = self.character
+    if not character then
+        self.portraitTexture = nil
+        self.portraitCharacter = nil
+        self.portraitRefreshAt = 0
+        return
+    end
+    local now = Clock.nowMs()
+    if now < self.portraitRefreshAt then return end
+    local ok, tex = pcall(function()
+        if portraitProvider then
+            return portraitProvider(character)
+        end
+        return nil
+    end)
+    if ok and tex then
+        self.portraitTexture = tex
+        self.portraitRefreshAt = math.huge
+    else
+        -- Brief back-off; the caller's fallback (profession icon / initials) shows meanwhile.
+        self.portraitRefreshAt = now + 100
+    end
+end
+
+function Avatar3DView:setPortrait(snapshot)
+    self.character,self.survivorDesc,self.portraitCharacter=nil,nil,nil
+    self.portraitTexture=snapshot and snapshot.texture
+    self.fallbackTexture=snapshot and snapshot.icon
+    self.fallbackInitials=snapshot and snapshot.name
+    self.initialsW=self.fallbackInitials and getTextManager():MeasureStringX(UIFont.Small,self.fallbackInitials) or 0
+end
+
+-- A detached service snapshot; never fetches or measures from draw.
+function Avatar3DView.drawSnapshot(owner,snapshot,x,y,size)
+    if snapshot.texture then
+        owner:setStencilRect(x,y,size,size)
+        owner:drawTextureScaledAspect(snapshot.texture,x+(size-size*PORTRAIT_TEXTURE_ZOOM)/2,
+            y+size*PORTRAIT_TEXTURE_Y_OFFSET,size*PORTRAIT_TEXTURE_ZOOM,size*PORTRAIT_TEXTURE_ZOOM,1,1,1,1)
+        owner:clearStencilRect()
+    elseif snapshot.icon then owner:drawTextureScaledAspect(snapshot.icon,x,y,size,size,1,1,1,1)
+    else Chrome.roundedRect(owner,x,y,size,size,Theme.well or Theme.dossier.panel,Theme.borderSubtle) end
+end
+
+function Avatar3DView:update()
+    ISPanel.update(self)
+    if self.activationScope and self.activationScope:isCurrent() and self.character and not self.portraitTexture and self:isVisible() then self:fetchPortrait() end
+end
+
+function Avatar3DView:prerender()
+    ISPanel.prerender(self)
+    local p = self.pad
+
+    -- 1. Dark survival frame with rounded Chrome surface and border
+    Chrome.roundedRect(self, 0, 0, self.width, self.height, Theme.well or Theme.avatarSurface, Theme.border)
+
+    -- 2. Draw the prepared portrait (or fallback), without native queries.
+
+    local hasPortrait = self.portraitTexture ~= nil
+    if hasPortrait then
+        local zoom = self.isBust and PORTRAIT_TEXTURE_ZOOM or FULLBODY_TEXTURE_ZOOM
+        local yOff = self.isBust and PORTRAIT_TEXTURE_Y_OFFSET or FULLBODY_TEXTURE_Y_OFFSET
+        local size = self.width - p * 2
+        local texSize = size * zoom
+        local tx = (self.width - texSize) / 2
+        local ty = p + size * yOff
+        self:setStencilRect(p, p, size, size)
+        self:drawTextureScaledAspect(self.portraitTexture, tx, ty, texSize, texSize, 1, 1, 1, 1)
+        self:clearStencilRect()
+    else
+        -- 3. Fallback rendering when the portrait is unavailable.
+        local cx = math.floor(self.width / 2)
+        local cy = math.floor(self.height / 2)
+
+        if self.fallbackTexture then
+            self:drawTextureScaledAspect(self.fallbackTexture, p, p, self.width - p * 2, self.height - p * 2, 1, 1, 1, 1)
+        else
+            -- Clean silhouette
+            local headR = math.max(6, math.floor(self.height * 0.18))
+            local headY = math.floor(self.height * 0.15)
+            Chrome.roundedRect(self, cx - headR, headY, headR * 2, headR * 2, Theme.avatarHead, Theme.borderSubtle)
+            local bodyW = math.max(12, math.floor(self.width * 0.55))
+            local bodyH = math.max(8, math.floor(self.height * 0.35))
+            local bodyY = headY + headR * 2 + 2
+            Chrome.roundedRect(self, cx - math.floor(bodyW / 2), bodyY, bodyW, bodyH, Theme.avatarBody, Theme.borderSubtle)
+
+            if self.fallbackInitials and self.fallbackInitials ~= "" then
+                local tw = self.initialsW or 0
+                local th = self.fontHeight
+                Theme.text(self, self.fallbackInitials, cx - math.floor(tw / 2), headY + math.floor((headR * 2 - th) / 2), Theme.gold)
+            end
+        end
+    end
+
+    -- 4. Injury Warning Badge Overlay
+    if self.injuryAlert then
+        local badgeSize = math.max(14, math.floor(self.fontHeight * 0.9))
+        local bx = self.width - badgeSize - 3
+        local by = 3
+        Chrome.roundedRect(self, bx, by, badgeSize, badgeSize, Theme.status.ERROR, Theme.avatarEdge)
+        Theme.text(self, "+", bx + 3, by - 1, Theme.avatarInk)
+    end
+end
+
+function Avatar3DView:onMouseDown(x, y)
+    -- Click to toggle bust / full-body framing
+    if x > self.width - 24 and y > self.height - 24 then
+        self:toggleBust()
+        return true
+    end
+    return false
+end
+
+return Avatar3DView

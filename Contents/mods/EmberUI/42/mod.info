@@ -1,0 +1,6 @@
+name=EmberUI Core
+id=EmberUI
+author=MuMu
+description=Standalone Zero-GC, themeable, extensible UI framework core for Project Zomboid B42.
+modversion=1.1.0
+versionMin=42.21.0
