@@ -15,5 +15,6 @@
 
 - 仓库构建运行 `./build.ps1`：它执行隔离和双语检查、Kahlua 编译与测试、OpenGL 画廊及打包。`-SkipPreview` 会跳过画廊，不得记作完整构建通过。
 - 修改 Lua 时运行 `node ../.workbuddy/tools/pz.mjs preflight .`；修改 Markdown 时对具体变更文件运行 `node ../.workbuddy/tools/pz.mjs doclink <文件...>`。共享工具先用 `node ../.workbuddy/tools/pz.mjs list` 查询入口。
+- 开发前搜索本仓库中相关实现；交付说明复用入口，未复用时说明原因。修改 Lua 时运行 `./tools/check-duplication.ps1`，PR 目标不为 `origin/main` 时指定 `-BaseRef <目标分支引用>`。检查新增相似片段并说明处理或保留原因；相似本身不阻断，工具、基准或扫描失败时报告未完成。
 - 修改 UI 布局或视觉时，运行 `./tools/preview-ui.ps1` 或使用完整构建生成的画廊，并回读相关截图；构建或截图不代替游戏内验收。翻译键保持 CN/EN 成对、位置占位符一致。
 - 门禁失败时报告原始错误，修复后重跑；不能将跳过、缺依赖或替身测试写成通过。交付注明 PR 链接、文件统计、检查结果、实机步骤及风险；更新日志不写入 `workshop.txt`。
